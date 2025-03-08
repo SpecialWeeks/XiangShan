@@ -33,7 +33,7 @@ import freechips.rocketchip.tilelink._
 import freechips.rocketchip.util._
 import org.chipsalliance.cde.config._
 import system.HasSoCParameter
-//import device.{IMSICAsync, MsiInfoBundle}
+import device.IMSICAsync
 import coupledL2.tl2chi.{AsyncPortIO, CHIAsyncBridgeSource, PortIO}
 import utility.sram.SramBroadcastBundle
 import utility.{DFTResetSignals, IntBuffer, ResetGen}
@@ -69,14 +69,14 @@ class XSTileWrap()(implicit p: Parameters) extends LazyModule
   val dmAsyncSourceOpt = Option.when(SeperateDMBus && EnableDMAsync)(LazyModule(new TLAsyncCrossingSource()))
   dmAsyncSourceOpt.foreach(_.node := tile.sep_dm_opt.get)
   // synchronous source node
-  val dmSyncSourceOpt = Option.when(SeperateDMBus && !EnableDMAsync)(TLTempNode())
+  val dmSyncSourceOpt = Option.when(SeperateDMBus && !EnableDMAsync && (!UseDMInTop))(TLTempNode())
   dmSyncSourceOpt.foreach(_ := tile.sep_dm_opt.get)
-
+ val DMTnTopSync = UseDMInTop & (!EnableDMAsync)   //dm integreted in xstop,and sync with cpu for mmio cfg.
   class XSTileWrapImp(wrapper: LazyModule) extends LazyRawModuleImp(wrapper) {
     val clock = IO(Input(Clock()))
     val reset = IO(Input(AsyncReset()))
     val noc_reset = EnableCHIAsyncBridge.map(_ => IO(Input(AsyncReset())))
-    val soc_reset = Option.when(!ClintAsyncFromCJ)(IO(Input(AsyncReset())))
+    val soc_reset = Option.when(!ClintAsyncFromCJ & !EnableDMAsync)(IO(Input(AsyncReset())))
     val i = Option.when(CHIAsyncFromCJ)(IO(new Bundle { // for customer J
       val dft = Input(new Bundle {
         val icg_scan_en = Bool()
@@ -84,15 +84,16 @@ class XSTileWrap()(implicit p: Parameters) extends LazyModule
       })
     }))
     val io = IO(new Bundle {
-      val hartId            = Input(UInt(hartIdLen.W))
-      val msiinfo           = new MSITransBundle(aia.IMSICParams())
-      val reset_vector      = Input(UInt(PAddrBits.W))
-      val cpu_halt          = Output(Bool())
+      val hartId = Input(UInt(hartIdLen.W))
+      val msiInfo = Input(ValidIO(UInt(soc.IMSICParams.MSI_INFO_WIDTH.W)))
+      val msiAck = Output(Bool())
+      val reset_vector = Input(UInt(PAddrBits.W))
+      val cpu_halt = Output(Bool())
       val cpu_crtical_error = Output(Bool())
       // ==UseDMInTop start: 1- DebugModule is integrated in XSTOP, only customer J need it,other 0.==
-      val hartResetReq  = Option.when(!UseDMInTop)(Input(Bool()))
-      val hartIsInReset = Option.when(!UseDMInTop)(Output(Bool()))
-      val dm = Option.when(UseDMInTop)(new Bundle {
+      val hartResetReq  = Option.when(!DMTnTopSync)(Input(Bool()))
+      val hartIsInReset = Option.when(!DMTnTopSync)(Output(Bool()))
+      val dm = Option.when(DMTnTopSync)(new Bundle {
         val dmi     = (!p(ExportDebug).apb).option(Flipped(new ClockedDMIIO()))
         val ndreset = Output(Bool()) // output of top,to request that soc can reset system logic exclude debug.
       })
@@ -128,7 +129,7 @@ class XSTileWrap()(implicit p: Parameters) extends LazyModule
     val hartResetReq = Wire(Bool()) // derive from io.hartResetReq or debugwrapper in top
     io.hartResetReq.foreach(iohartResetReq => hartResetReq := iohartResetReq)
 
-    val reset_sync = withClockAndReset(clock, (reset.asBool || io.hartResetReq).asAsyncReset)(ResetGen(2, io.dft_reset))
+    val reset_sync = withClockAndReset(clock, (reset.asBool || io.hartResetReq.get).asAsyncReset)(ResetGen(2, io.dft_reset))
     val noc_reset_sync = EnableCHIAsyncBridge.map(_ => withClockAndReset(clock, noc_reset.get)(ResetGen(2, io.dft_reset)))
     val soc_reset_sync = withClockAndReset(clock, soc_reset.get)(ResetGen(2, io.dft_reset))
 
@@ -138,18 +139,14 @@ class XSTileWrap()(implicit p: Parameters) extends LazyModule
 
     tile.module.io.hartId := io.hartId
     // connect msi info io with xstile
-    // start :TBD zhaohong ,wait tile update the msi interface,
-
-    tile.module.io.msiInfo.valid := io.msiinfo.vld_req
-    io.msiinfo.vld_ack           := io.msiinfo.vld_req // TODO
-    tile.module.io.msiInfo.bits.info := io.msiinfo.data // 1.U // TODO for compile error since type donot match io.msiinfo.data
-    // end :TBD zhaohong
-
+    tile.module.io.msiInfo := io.msiInfo
+    io.msiAck := tile.module.io.msiAck
     tile.module.io.reset_vector := io.reset_vector
     tile.module.io.dft.zip(io.dft).foreach({case(a, b) => a := b})
     tile.module.io.dft_reset.zip(io.dft_reset).foreach({case(a, b) => a := b})
     io.cpu_halt := tile.module.io.cpu_halt
     io.cpu_crtical_error := tile.module.io.cpu_crtical_error
+    io.msiAck := tile.module.io.msiAck
     io.hartIsInReset.foreach(_ := tile.module.io.hartIsInReset)
     io.traceCoreInterface <> tile.module.io.traceCoreInterface
     io.debugTopDown <> tile.module.io.debugTopDown
@@ -160,16 +157,11 @@ class XSTileWrap()(implicit p: Parameters) extends LazyModule
     io.pwrdown_ack_n.foreach { _ := true.B }
 
     // instance :TL DebugModule
-//    val debugModule = Option.when(UseDMInTop){
-//      val l_debugModule = LazyModule(new DebugModule(numCores = NumCores, defDTM = false)(p))
-////      l_debugModule.debug.node := TLBuffer() := TLFragmenter(8,32) := xbar // TLXbar())
-//      l_debugModule.debug.node := TLXbar()
-//      l_debugModule
-//    }
-    val l_debugModule = Option.when(UseDMInTop)(LazyModule(new DebugModule(numCores = NumCores, defDTM = false)(p)))
+    val l_debugModule = Option.when(DMTnTopSync)(LazyModule(new DebugModule(numCores = NumCores, defDTM = false)(p)))
 //    val debugModule = Option.when(UseDMInTop)(Module(l_debugModule.get.module))
     val debugModule = l_debugModule.map(l_debugModule => Module(l_debugModule.module))
-    l_debugModule.foreach(_.debug.node := TLXbar()) // TBD connect with xstile.tl.out
+    // debug module TL connect xstile directly, if DM integrate in XSTop and sync with CPU.
+    l_debugModule.foreach(_.debug.node := tile.sep_dm_opt.get)
     //    debugModule.foreach(_.module.debug.dmInner.dmInner.sb2tlOpt.foreach { sb2tl =>
     //      io.dm.mbus := sb2tl.node    //master node connect about debug
     //    })

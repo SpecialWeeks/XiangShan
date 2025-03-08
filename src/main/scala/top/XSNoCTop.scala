@@ -19,6 +19,7 @@ package top
 import aia.{AXIRegIMSIC_WRAP, IMSICParams, MSITransBundle}
 import chisel3._
 import chisel3.util._
+import chisel3.experimental.dataview._
 import xiangshan._
 import utils._
 import utility._
@@ -72,10 +73,7 @@ class XSNoCTop()(implicit p: Parameters) extends BaseXSSoc with HasSoCParameter
   })))
 
   // imsic bus top
-  val u_imsic_bus_top = Option.when(!IMSICUseHalf)(LazyModule(new imsic_bus_top(
-    useTL = soc.IMSICUseTL,
-    baseAddress = (0x3A800000, 0x3B000000)
-  )))
+  val u_imsic_bus_top = LazyModule(new imsic_bus_top)
   // interrupts
   val clintIntNode = IntSourceNode(IntSourcePortSimple(1, 1, 2))
   val debugIntNode = IntSourceNode(IntSourcePortSimple(1, 1, 1))
@@ -184,17 +182,19 @@ class XSNoCTop()(implicit p: Parameters) extends BaseXSSoc with HasSoCParameter
       }
       val memcfg = Input(UInt(64.W))   // for memory adjust,such as rate,sequence,..
       // differentiate imsic version
-      val msiinfo = Option.when(IMSICUseHalf)(new MSITransBundle(aia.IMSICParams()))
+//      val msiinfo = Option.when(IMSICUseHalf)(new MSITransBundle(aia.IMSICParams()))
       val jtag = Option.when(UseDMInTop)(Flipped(new JTAGIO(hasTRSTn = true)))
       val dft = if(hasMbist) Some(Input(new SramBroadcastBundle)) else None
       val dft_reset = if(hasMbist) Some(Input(new DFTResetSignals())) else None
       val lp = Option.when(EnablePowerDown) (new LowPowerIO)
     })
-    // imsic axi4lite io
-    val imsic_axi4lite = wrapper.u_imsic_bus_top.map(_.module.axi4lite.map(x => IO(chiselTypeOf(x))))
+    // imsic axi4 io
+    val imsic_axi4 = wrapper.u_imsic_bus_top.axi4.map(x => IO(Flipped(new VerilogAXI4Record(x.elts.head.params.copy(addrBits = 32)))))
     // imsic tl io
-    val imsic_m_tl = wrapper.u_imsic_bus_top.map(_.tl_m.map(x => IO(chiselTypeOf(x.getWrappedValue))))
-    val imsic_s_tl = wrapper.u_imsic_bus_top.map(_.tl_s.map(x => IO(chiselTypeOf(x.getWrappedValue))))
+    val imsic_m_tl = wrapper.u_imsic_bus_top.tl_m.map(x => IO(chiselTypeOf(x.getWrappedValue)))
+    val imsic_s_tl = wrapper.u_imsic_bus_top.tl_s.map(x => IO(chiselTypeOf(x.getWrappedValue)))
+    // imsic bare io
+    val imsic = wrapper.u_imsic_bus_top.module.msi.map(x => IO(chiselTypeOf(x)))
 
     val reset_sync = withClockAndReset(clock, reset) { ResetGen(2, io.dft_reset) }
     val jtag_reset = ~(io.jtag.flatMap(_.TRSTn).getOrElse(true.B)) //change since resetGen is active high
@@ -205,30 +205,11 @@ class XSNoCTop()(implicit p: Parameters) extends BaseXSSoc with HasSoCParameter
     wrapper.core_with_l2.module.io.dft.zip(io.dft).foreach({case(a, b) => a := b})
     wrapper.core_with_l2.module.io.dft_reset.zip(io.dft_reset).foreach({case(a, b) => a := b})
     // device clock and reset
-    wrapper.u_imsic_bus_top.foreach(_.module.clock := soc_clock.get)
-    wrapper.u_imsic_bus_top.foreach(_.module.reset := soc_reset_sync)
-    
-    // imsic axi4lite io connection
-    wrapper.u_imsic_bus_top.foreach(_.module.axi4lite.foreach(_ <> imsic_axi4lite.get.get))
 
-    // imsic tl io connection
-    wrapper.u_imsic_bus_top.foreach(_.tl_m.foreach(_ <> imsic_m_tl.get.get))
-    wrapper.u_imsic_bus_top.foreach(_.tl_s.foreach(_ <> imsic_s_tl.get.get))
-
-    // temporary dontcare some io
-    IMSICUseHalf match{
-      case (true) =>
-        io.msiinfo.foreach(_ <> core_with_l2.module.io.msiinfo)
-      case (false) =>
-        core_with_l2.module.io.msiinfo.vld_req := wrapper.u_imsic_bus_top.get.module.o_msi_info_vld
-        core_with_l2.module.io.msiinfo.data := wrapper.u_imsic_bus_top.get.module.o_msi_info
-    }
-
-    io.jtag.foreach(_ <> DontCare)
-    // TODO requirement from customer J: instanciated dtm to connected with debug,as other half module of debug module.
+    //  requirement from customer J: instanciated dtm to connected with debug,as other half module of debug module.
     //    def instantiateJtagDTM(sj: SystemJTAGIO): DebugTransportModuleJTAG = {
     val c = new JtagDTMKeyDefault
-    val dtm = Option.when(UseDMInTop)(Module(new DebugTransportModuleJTAG(p(DebugModuleKey).get.nDMIAddrSize, c)))
+    val dtm = Option.when(UseDMInTop & !EnableDMAsync)(Module(new DebugTransportModuleJTAG(p(DebugModuleKey).get.nDMIAddrSize, c)))
     //start TBD about JTAG zhaohong
     //      io.debugIO.disableDebug.foreach { x => dtm.io.jtag.TMS := sj.jtag.TMS | x }  // force TMS high when debug is disabled
     dtm.foreach { dtm =>
@@ -239,8 +220,18 @@ class XSNoCTop()(implicit p: Parameters) extends BaseXSSoc with HasSoCParameter
       dtm.io.jtag_version := 0.U
       dtm.rf_reset := 0.U
     }
-         dtm.foreach(_.io.dmi<>core_with_l2.module.io.dm.get.dmi.get)  //wait core_with_l2 update dm interface
-    //end TBD about JTAG zhaohong
+    dtm.foreach(_.io.dmi <> core_with_l2.module.io.dm.get.dmi.get) //wait core_with_l2 update dm interface
+
+    wrapper.u_imsic_bus_top.module.clock := soc_clock.get
+    wrapper.u_imsic_bus_top.module.reset := soc_reset_sync
+
+    // imsic axi4 io connection
+    imsic_axi4.foreach(_.viewAs[AXI4Bundle] <> wrapper.u_imsic_bus_top.axi4.get.elements.head._2)
+    // imsic tl io connection
+    wrapper.u_imsic_bus_top.tl_m.foreach(_ <> imsic_m_tl.get)
+    wrapper.u_imsic_bus_top.tl_s.foreach(_ <> imsic_s_tl.get)
+    // imsic bare io connection
+    wrapper.u_imsic_bus_top.module.msi.foreach(_ <> imsic.get)
 
     // input
     dontTouch(io)
@@ -386,8 +377,9 @@ class XSNoCTop()(implicit p: Parameters) extends BaseXSSoc with HasSoCParameter
       dmAsyncSinkOpt.get.module.reset := soc_reset_sync
     }
 
-    core_with_l2.module.io.msiInfo.valid := wrapper.u_imsic_bus_top.module.o_msi_info_vld
-    core_with_l2.module.io.msiInfo.bits.info := wrapper.u_imsic_bus_top.module.o_msi_info
+    core_with_l2.module.io.msiInfo.valid := wrapper.u_imsic_bus_top.module.msiio.vld_req
+    core_with_l2.module.io.msiInfo.bits := wrapper.u_imsic_bus_top.module.msiio.data
+    wrapper.u_imsic_bus_top.module.msiio.vld_ack := core_with_l2.module.io.msiAck
     // tie off core soft reset
     core_rst_node.out.head._1 := false.B.asAsyncReset
 
@@ -432,7 +424,10 @@ class XSNoCDiffTop(implicit p: Parameters) extends Module {
   exposeIO(soc.io, "io")
   exposeOptionIO(soc.noc_clock, "noc_clock")
   exposeOptionIO(soc.noc_reset, "noc_reset")
-  exposeOption2IO(soc.imsic_axi4lite, "imsic_axi4lite")
+  exposeOptionIO(soc.imsic_axi4, "imsic_axi4")
+  exposeOptionIO(soc.imsic_m_tl, "imsic_m_tl")
+  exposeOptionIO(soc.imsic_s_tl, "imsic_s_tl")
+  exposeOptionIO(soc.imsic, "imsic")
 
   // TODO:
   // XSDiffTop is only part of DUT, we can not instantiate difftest here.

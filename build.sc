@@ -203,6 +203,15 @@ object fudian extends HasChisel {
 
 }
 
+object chiselAIA extends HasChisel {
+  override def millSourcePath = pwd / "ChiselAIA"
+
+  override def moduleDeps = super.moduleDeps ++ Seq(
+    rocketchip,
+    utility
+  )
+}
+
 object macros extends ScalaModule {
 
   override def millSourcePath = pwd / "macros"
@@ -233,9 +242,10 @@ trait XiangShanModule extends ScalaModule {
 
   def yunsuanModule: ScalaModule
 
+  def chiselAIAModule: ScalaModule
+
   def macrosModule: ScalaModule
 
-  def aiaModule: ScalaModule
 
   override def moduleDeps = super.moduleDeps ++ Seq(
     rocketModule,
@@ -246,7 +256,7 @@ trait XiangShanModule extends ScalaModule {
     yunsuanModule,
     fudianModule,
     utilityModule,
-    aiaModule,
+    chiselAIAModule,
     macrosModule,
   )
 
@@ -274,9 +284,10 @@ object xiangshan extends XiangShanModule with HasChisel with ScalafmtModule {
 
   def utilityModule = utility
 
-  def aiaModule = aia
 
   def yunsuanModule = yunsuan
+
+  def chiselAIAModule = chiselAIA
 
   def macrosModule = macros
 
