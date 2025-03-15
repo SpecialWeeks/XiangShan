@@ -166,7 +166,7 @@ class XSNoCTop()(implicit p: Parameters) extends BaseXSSoc with HasSoCParameter
     // device clock and reset
     wrapper.u_imsic_bus_top.foreach(_.module.clock := soc_clock.get)
     wrapper.u_imsic_bus_top.foreach(_.module.reset := soc_reset_sync)
-
+    
     // imsic axi4lite io connection
     wrapper.u_imsic_bus_top.foreach(_.module.axi4lite.foreach(_ <> imsic_axi4lite.get.get))
 
