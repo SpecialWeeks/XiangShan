@@ -20,6 +20,7 @@ import chisel3._
 import chisel3.util._
 import org.chipsalliance.cde.config._
 import chisel3.util.{Valid, ValidIO}
+import freechips.rocketchip.devices.debug.DebugModuleKey
 import freechips.rocketchip.diplomacy._
 import freechips.rocketchip.interrupts._
 import freechips.rocketchip.tile.{BusErrorUnit, BusErrorUnitParams, BusErrors, MaxHartIdBits}
@@ -35,6 +36,7 @@ import utility._
 import xiangshan.cache.mmu.TlbRequestIO
 import xiangshan.backend.fu.PMPRespBundle
 import xiangshan.backend.trace.{Itype, TraceCoreInterface}
+import utility.sram.SramBroadcastBundle
 
 class L1BusErrorUnitInfo(implicit val p: Parameters) extends Bundle with HasSoCParameter {
   val ecc_error = Valid(UInt(soc.PAddrBits.W))
@@ -82,8 +84,9 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
   ))
 
   val i_mmio_port = TLTempNode()
-  val icachectrl_port_opt = if(icacheParameters.cacheCtrlAddressOpt.nonEmpty) Option(TLTempNode()) else None
   val d_mmio_port = TLTempNode()
+  val icachectrl_port_opt = Option.when(icacheParameters.cacheCtrlAddressOpt.nonEmpty)(TLTempNode())
+  val sep_dm_port_opt = Option.when(SeperateDMBus)(TLTempNode())
 
   val misc_l2_pmu = BusPerfMonitor(name = "Misc_L2", enable = !debugOpts.FPGAPlatform) // l1D & l1I & PTW
   val l2_l3_pmu = BusPerfMonitor(name = "L2_L3", enable = !debugOpts.FPGAPlatform && !enableCHI, stat_latency = true)
@@ -100,13 +103,15 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
   val debug_int_node = IntIdentityNode()
   val plic_int_node = IntIdentityNode()
   val nmi_int_node = IntIdentityNode()
+  val beu_local_int_source = IntSourceNode(IntSourcePortSimple())
 
   println(s"enableCHI: ${enableCHI}")
   val l2cache = if (enableL2) {
     val config = new Config((_, _, _) => {
       case L2ParamKey => coreParams.L2CacheParamsOpt.get.copy(
         hartId = p(XSCoreParamsKey).HartId,
-        FPGAPlatform = debugOpts.FPGAPlatform
+        FPGAPlatform = debugOpts.FPGAPlatform,
+        hasMbist = hasMbist
       )
       case EnableCHI => p(EnableCHI)
       case CHIIssue => p(CHIIssue)
@@ -142,11 +147,14 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
   if (icacheParameters.cacheCtrlAddressOpt.nonEmpty) {
     icachectrl_port_opt.get := TLBuffer.chainNode(1) := mmio_xbar
   }
+  if (SeperateDMBus) {
+    sep_dm_port_opt.get := TLBuffer.chainNode(1) := mmio_xbar
+  }
 
   // filter out in-core addresses before sent to mmio_port
   // Option[AddressSet] ++ Option[AddressSet] => List[AddressSet]
-  private def mmioFilters: Seq[AddressSet] =
-    (icacheParameters.cacheCtrlAddressOpt ++ dcacheParameters.cacheCtrlAddressOpt).toSeq
+  private def cacheAddressSet: Seq[AddressSet] = (icacheParameters.cacheCtrlAddressOpt ++ dcacheParameters.cacheCtrlAddressOpt).toSeq
+  private def mmioFilters = if(SeperateDMBus) (p(DebugModuleKey).get.address +: cacheAddressSet) else cacheAddressSet
   mmio_port :=
     TLFilter(TLFilter.mSubtract(mmioFilters)) :=
     TLBuffer() :=
@@ -168,10 +176,6 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
         val toCore = Output(ValidIO(new MsiInfoBundle))
       }
       val cpu_halt = new Bundle() {
-        val fromCore = Input(Bool())
-        val toTile = Output(Bool())
-      }
-      val cpu_poff = new Bundle() {
         val fromCore = Input(Bool())
         val toTile = Output(Bool())
       }
@@ -208,12 +212,21 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
       val l2_pmp_resp = Flipped(new PMPRespBundle)
       val l2_hint = ValidIO(new L2ToL1Hint())
       val perfEvents = Output(Vec(numPCntHc * coreParams.L2NBanks + 1, new PerfEvent))
-      val l2_flush_en = Input(Bool())
-      val l2_flush_done = Output(Bool())
+      val l2_flush_en = Option.when(EnablePowerDown) (Input(Bool()))
+      val l2_flush_done = Option.when(EnablePowerDown) (Output(Bool()))
+      val dft = if(hasMbist) Some(Input(new SramBroadcastBundle)) else None
+      val dft_out = if(hasMbist) Some(Output(new SramBroadcastBundle)) else None
+      val dft_reset = if(hasMbist) Some(Input(new DFTResetSignals())) else None
+      val dft_reset_out = if(hasMbist) Some(Output(new DFTResetSignals())) else None
       // val reset_core = IO(Output(Reset()))
     })
+    io.dft_out.zip(io.dft).foreach({case(a, b) => a := b})
+    io.dft_reset_out.zip(io.dft_reset).foreach({case(a, b) => a := b})
 
     val resetDelayN = Module(new DelayN(UInt(PAddrBits.W), 5))
+
+    val (beu_int_out, _) = beu_local_int_source.out(0)
+    beu_int_out(0) := beu.module.io.interrupt
 
     beu.module.io.errors.icache := io.beu_errors.icache
     beu.module.io.errors.dcache := io.beu_errors.dcache
@@ -222,9 +235,7 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
     io.hartId.toCore := io.hartId.fromTile
     io.msiInfo.toCore := io.msiInfo.fromTile
     io.cpu_halt.toTile := io.cpu_halt.fromCore
-    io.cpu_poff.toTile := io.cpu_poff.fromCore
     io.cpu_critical_error.toTile := io.cpu_critical_error.fromCore
-    io.l2_flush_done := true.B //TODO connect CoupleedL2
     io.l3Miss.toCore := io.l3Miss.fromTile
     io.clintTime.toCore := io.clintTime.fromTile
     // trace interface
@@ -266,6 +277,8 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
       val l2 = l2cache.get.module
 
       l2.io.pfCtrlFromCore := io.pfCtrlFromCore
+      l2.io.dft.zip(io.dft).foreach({case(a, b) => a := b})
+      l2.io.dft_reset.zip(io.dft_reset).foreach({case(a, b) => a := b})
       io.l2_hint := l2.io.l2_hint
       l2.io.debugTopDown.robHeadPaddr := DontCare
       l2.io.hartId := io.hartId.fromTile
@@ -273,6 +286,8 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
       l2.io.debugTopDown.robTrueCommit := io.debugTopDown.robTrueCommit
       io.debugTopDown.l2MissMatch := l2.io.debugTopDown.l2MissMatch
       io.l2Miss := l2.io.l2Miss
+      io.l2_flush_done.foreach { _ := l2.io.l2FlushDone.getOrElse(false.B) }
+      l2.io.l2Flush.foreach { _ := io.l2_flush_en.getOrElse(false.B) }
 
       /* l2 tlb */
       io.l2_tlb_req.req.bits := DontCare
@@ -351,7 +366,7 @@ class L2Top()(implicit p: Parameters) extends LazyModule
       ResetGen(ResetGenNode(Seq(
         CellNode(reset_core),
         ModuleNode(inner.module)
-      )), reset, sim = false)
+      )), reset, sim = false, io.dft_reset)
     } else {
       reset_core := DontCare
     }

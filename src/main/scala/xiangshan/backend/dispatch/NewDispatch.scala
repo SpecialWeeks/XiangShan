@@ -322,7 +322,7 @@ class NewDispatch(implicit p: Parameters) extends XSModule with HasPerfEvents wi
     val vma = fromRename(i).bits.vpu.vma
     val vm = fromRename(i).bits.vpu.vm
     val vlIsVlmax = vlBusyTable.io_vl_read.vlReadInfo(i).is_vlmax
-    val vlIsNonZero = !vlBusyTable.io_vl_read.vlReadInfo(i).is_zero
+    val vlIsNonZero = vlBusyTable.io_vl_read.vlReadInfo(i).is_nonzero
     val ignoreTail = vlIsVlmax && (vm =/= 0.U || vma) && !isWritePartVd
     val ignoreWhole = (vm =/= 0.U || vma) && vta
     val ignoreOldVd = vlBusyTable.io.read(i).resp && vlIsNonZero && !isDependOldVd && (ignoreTail || ignoreWhole)
@@ -451,7 +451,7 @@ class NewDispatch(implicit p: Parameters) extends XSModule with HasPerfEvents wi
   }
   for (i <- 0 until RenameWidth){
     // check is drop amocas sta
-    fromRenameUpdate(i).bits.isDropAmocasSta := fromRename(i).bits.isAMOCAS && fromRename(i).bits.uopIdx(0) === 1.U
+    fromRenameUpdate(i).bits.isDropAmocasSta := fromRename(i).bits.isAMOCAS && fromRename(i).bits.uopIdx(0) === 0.U
     // update singleStep
     fromRenameUpdate(i).bits.singleStep := io.singleStep && (fromRename(i).bits.robIdx =/= robidxCanCommitStepping)
   }
@@ -747,10 +747,10 @@ class NewDispatch(implicit p: Parameters) extends XSModule with HasPerfEvents wi
     }
     // // update singleStep, singleStep exception only enable in next machine instruction.
     updatedUop(i).singleStep := io.singleStep && (fromRename(i).bits.robIdx =/= robidxCanCommitStepping)
-    when (fromRename(i).fire) {
-      XSDebug(TriggerAction.isDmode(updatedUop(i).trigger) || updatedUop(i).exceptionVec(breakPoint), s"Debug Mode: inst ${i} has frontend trigger exception\n")
-      XSDebug(updatedUop(i).singleStep, s"Debug Mode: inst ${i} has single step exception\n")
-    }
+    XSDebug(
+      fromRename(i).fire &&
+        (TriggerAction.isDmode(updatedUop(i).trigger) || updatedUop(i).exceptionVec(breakPoint)), s"Debug Mode: inst ${i} has frontend trigger exception\n")
+    XSDebug(fromRename(i).fire && updatedUop(i).singleStep, s"Debug Mode: inst ${i} has single step exception\n")
     if (env.EnableDifftest) {
       // debug runahead hint
       val debug_runahead_checkpoint_id = Wire(checkpoint_id.cloneType)
@@ -906,7 +906,7 @@ class NewDispatch(implicit p: Parameters) extends XSModule with HasPerfEvents wi
     ))
   }
 
-  TopDownCounters.values.foreach(ctr => XSPerfAccumulate(ctr.toString(), PopCount(stallReason.map(_ === ctr.id.U))))
+  TopDownCounters.values.foreach(ctr => XSPerfAccumulate(ctr.toString(), PopCount(stallReason.map(_ === ctr.id.U)), XSPerfLevel.CRITICAL))
 
   val robTrueCommit = io.debugTopDown.fromRob.robTrueCommit
   TopDownCounters.values.foreach(ctr => XSPerfRolling("td_"+ctr.toString(), PopCount(stallReason.map(_ === ctr.id.U)),

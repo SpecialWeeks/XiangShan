@@ -917,8 +917,8 @@ class StoreQueue(implicit p: Parameters) extends XSModule
   ncResp.bits <> io.uncache.resp.bits
   when (ncDeqTrigger) {
     allocated(ncPtr) := false.B
-    XSDebug("nc fire: ptr %d\n", ncPtr)
   }
+  XSDebug(ncDeqTrigger,"nc fire: ptr %d\n", ncPtr)
 
   mmioReq.ready := io.uncache.req.ready
   ncReq.ready := io.uncache.req.ready && !mmioReq.valid
@@ -931,7 +931,9 @@ class StoreQueue(implicit p: Parameters) extends XSModule
   val deqCanDoCbo = GatedRegNext(LSUOpType.isCbo(uop(deqPtr).fuOpType) && allocated(deqPtr) && addrvalid(deqPtr) && !hasException(deqPtr))
 
   // RegNext(io.sbuffer(i).fire) is used to alignment timing
-  val isCboZeroToSbVec   = (0 until EnsbufferWidth).map{ i => RegNext(io.sbuffer(i).fire) && uop(deqPtrExt(i).value).fuOpType === LSUOpType.cbo_zero }
+  val isCboZeroToSbVec = (0 until EnsbufferWidth).map{ i =>
+    RegNext(io.sbuffer(i).fire) && uop(deqPtrExt(i).value).fuOpType === LSUOpType.cbo_zero && allocated(deqPtrExt(i).value)
+  }
   val cboZeroToSb        = isCboZeroToSbVec.reduce(_ || _)
   val cboZeroFlushSb     = GatedRegNext(cboZeroToSb)
 
@@ -1457,9 +1459,9 @@ class StoreQueue(implicit p: Parameters) extends XSModule
   // If redirect at T0, sqCancelCnt is at T2
   io.sqCancelCnt := redirectCancelCount
   val ForceWriteUpper = Wire(UInt(log2Up(StoreQueueSize + 1).W))
-  ForceWriteUpper := Constantin.createRecord(s"ForceWriteUpper_${p(XSCoreParamsKey).HartId}", initValue = 60)
+  ForceWriteUpper := Constantin.createRecord(s"ForceWriteUpper_${p(XSCoreParamsKey).HartId}", initValue = StoreQueueForceWriteSbufferUpper)
   val ForceWriteLower = Wire(UInt(log2Up(StoreQueueSize + 1).W))
-  ForceWriteLower := Constantin.createRecord(s"ForceWriteLower_${p(XSCoreParamsKey).HartId}", initValue = 55)
+  ForceWriteLower := Constantin.createRecord(s"ForceWriteLower_${p(XSCoreParamsKey).HartId}", initValue = StoreQueueForceWriteSbufferLower)
 
   val valid_cnt = PopCount(allocated)
   io.force_write := RegNext(Mux(valid_cnt >= ForceWriteUpper, true.B, valid_cnt >= ForceWriteLower && io.force_write), init = false.B)

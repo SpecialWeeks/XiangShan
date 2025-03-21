@@ -118,6 +118,10 @@ object utility extends HasChisel {
     rocketchip
   )
 
+  override def ivyDeps = super.ivyDeps() ++ Agg(
+    ivy"com.lihaoyi::sourcecode:0.4.2",
+  )
+
 }
 
 object aia extends $file.ChiselAIA.common.ChiselAIAModule with HasChisel {

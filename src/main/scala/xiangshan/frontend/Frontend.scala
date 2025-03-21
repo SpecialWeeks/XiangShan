@@ -34,8 +34,12 @@ import freechips.rocketchip.diplomacy.LazyModule
 import freechips.rocketchip.diplomacy.LazyModuleImp
 import org.chipsalliance.cde.config.Parameters
 import utility._
+import utility.mbist.MbistInterface
+import utility.mbist.MbistPipeline
+import utility.sram.SramBroadcastBundle
+import utility.sram.SramHelper
 import xiangshan._
-import xiangshan.backend.fu.PFEvent
+import xiangshan.backend.fu.NewCSR.PFEvent
 import xiangshan.backend.fu.PMP
 import xiangshan.backend.fu.PMPChecker
 import xiangshan.backend.fu.PMPReqBundle
@@ -54,7 +58,7 @@ class FrontendImp(wrapper: Frontend)(implicit p: Parameters) extends LazyModuleI
   io <> wrapper.inner.module.io
   io_perf <> wrapper.inner.module.io_perf
   if (p(DebugOptionsKey).ResetGen) {
-    ResetGen(ResetGenNode(Seq(ModuleNode(wrapper.inner.module))), reset, sim = false)
+    ResetGen(ResetGenNode(Seq(ModuleNode(wrapper.inner.module))), reset, sim = false, io.dft_reset)
   }
 }
 
@@ -92,6 +96,8 @@ class FrontendInlinedImp(outer: FrontendInlined) extends LazyModuleImp(outer)
     val debugTopDown = new Bundle {
       val robHeadVaddr = Flipped(Valid(UInt(VAddrBits.W)))
     }
+    val dft       = if (hasMbist) Some(Input(new SramBroadcastBundle)) else None
+    val dft_reset = if (hasMbist) Some(Input(new DFTResetSignals)) else None
   })
 
   // decouped-frontend modules
@@ -135,7 +141,11 @@ class FrontendInlinedImp(outer: FrontendInlined) extends LazyModuleImp(outer)
   pmp_req_vec.last <> ifu.io.pmp.req
 
   for (i <- pmp_check.indices) {
-    pmp_check(i).apply(tlbCsr.priv.imode, pmp.io.pmp, pmp.io.pma, pmp_req_vec(i))
+    if (HasBitmapCheck) {
+      pmp_check(i).apply(tlbCsr.mbmc.CMODE.asBool, tlbCsr.priv.imode, pmp.io.pmp, pmp.io.pma, pmp_req_vec(i))
+    } else {
+      pmp_check(i).apply(tlbCsr.priv.imode, pmp.io.pmp, pmp.io.pma, pmp_req_vec(i))
+    }
   }
   (0 until 2 * PortNumber).foreach(i => icache.io.pmp(i).resp <> pmp_check(i).resp)
   ifu.io.pmp.resp <> pmp_check.last.resp
@@ -433,4 +443,32 @@ class FrontendInlinedImp(outer: FrontendInlined) extends LazyModuleImp(outer)
   val allPerfInc          = allPerfEvents.map(_._2.asTypeOf(new PerfEvent))
   override val perfEvents = HPerfMonitor(csrevents, allPerfInc).getPerfEvents
   generatePerfEvent()
+
+  private val mbistPl = MbistPipeline.PlaceMbistPipeline(Int.MaxValue, "MbistPipeFrontend", hasMbist)
+  private val mbistIntf = if (hasMbist) {
+    val params = mbistPl.get.nodeParams
+    val intf = Some(Module(new MbistInterface(
+      params = Seq(params),
+      ids = Seq(mbistPl.get.childrenIds),
+      name = s"MbistIntfFrontend",
+      pipelineNum = 1
+    )))
+    intf.get.toPipeline.head <> mbistPl.get.mbist
+    mbistPl.get.registerCSV(intf.get.info, "MbistFrontend")
+    intf.get.mbist := DontCare
+    dontTouch(intf.get.mbist)
+    // TODO: add mbist controller connections here
+    intf
+  } else {
+    None
+  }
+  private val sigFromSrams = if (hasMbist) Some(SramHelper.genBroadCastBundleTop()) else None
+  private val cg           = ClockGate.genTeSrc
+  dontTouch(cg)
+  if (hasMbist) {
+    sigFromSrams.get := io.dft.get
+    cg.cgen          := io.dft.get.cgen
+  } else {
+    cg.cgen := false.B
+  }
 }

@@ -301,7 +301,7 @@ class TlbSectorEntry(pageNormal: Boolean, pageSuper: Boolean)(implicit p: Parame
     val s1tag = item.s1.entry.tag
     val s2tag = item.s2.entry.tag(gvpnLen - 1, sectortlbwidth)
     this.tag := Mux(item.s2xlate === onlyStage2, s2tag, s1tag)
-    val s2page_pageSuper = item.s2.entry.level.getOrElse(0.U) =/= 0.U
+    val s2page_pageSuper = item.s2.entry.level.getOrElse(0.U) =/= 0.U || item.s2.entry.n.getOrElse(0.U) =/= 0.U
     this.pteidx := Mux(item.s2xlate === onlyStage2, VecInit(UIntToOH(item.s2.entry.tag(sectortlbwidth - 1, 0)).asBools), item.s1.pteidx)
     val s2_valid = Mux(s2page_pageSuper, VecInit(Seq.fill(tlbcontiguous)(true.B)), VecInit(UIntToOH(item.s2.entry.tag(sectortlbwidth - 1, 0)).asBools))
     this.valididx := Mux(item.s2xlate === onlyStage2, s2_valid, item.s1.valididx)
@@ -906,7 +906,7 @@ class PtwEntry(tagLen: Int, hasPerm: Boolean = false, hasLevel: Boolean = false,
 
     tag := vpn(vpnLen - 1, vpnLen - tagLen)
     pbmt := pte.asTypeOf(new PteBundle().cloneType).pbmt
-    ppn := pte.asTypeOf(new PteBundle().cloneType).ppn
+    ppn := pte.asTypeOf(new PteBundle().cloneType).getPPN()
     perm.map(_ := pte.asTypeOf(new PteBundle().cloneType).perm)
     n.map(_ := pte.asTypeOf(new PteBundle().cloneType).n)
     this.asid := asid
@@ -941,6 +941,7 @@ class PtwMergeEntry(tagLen: Int, hasPerm: Boolean = false, hasLevel: Boolean = f
   val ppn_low = UInt(sectortlbwidth.W)
   val af = Bool()
   val pf = Bool()
+  val cf = Bool() // Bitmap Check Failed
 }
 
 class PtwEntries(num: Int, tagLen: Int, level: Int, hasPerm: Boolean, ReservedBits: Int)(implicit p: Parameters) extends PtwBundle {
@@ -996,7 +997,7 @@ class PtwEntries(num: Int, tagLen: Int, level: Int, hasPerm: Boolean, ReservedBi
     for (i <- 0 until num) {
       val pte = data((i+1)*XLEN-1, i*XLEN).asTypeOf(new PteBundle)
       ps.pbmts(i) := pte.pbmt
-      ps.ppns(i) := pte.ppn
+      ps.ppns(i) := pte.getPPN()
       ps.vs(i)   := (pte.canRefill(levelUInt, s2xlate, pbmte, mode) && (if (hasPerm) pte.isLeaf() else !pte.isLeaf())) || (if (hasPerm) pte.onlyPf(levelUInt, s2xlate, pbmte) else false.B)
       ps.onlypf(i) := pte.onlyPf(levelUInt, s2xlate, pbmte)
       ps.perms.map(_(i) := pte.perm)
@@ -1235,7 +1236,7 @@ class PtwMergeResp(implicit p: Parameters) extends PtwBundle {
   val not_super = Bool()
   val not_merge = Bool()
 
-  def apply(pf: Bool, af: Bool, level: UInt, pte: PteBundle, vpn: UInt, asid: UInt, vmid:UInt, addr_low : UInt, not_super : Boolean = true, not_merge: Boolean = false) = {
+  def apply(pf: Bool, af: Bool, level: UInt, pte: PteBundle, vpn: UInt, asid: UInt, vmid:UInt, addr_low : UInt, not_super : Boolean = true, not_merge: Boolean = false, cf : Bool) = {
     assert(tlbcontiguous == 8, "Only support tlbcontiguous = 8!")
     val resp_pte = pte
     val ptw_resp = Wire(new PtwMergeEntry(tagLen = sectorvpnLen, hasPerm = true, hasLevel = true, hasNapot = true))
@@ -1248,6 +1249,7 @@ class PtwMergeResp(implicit p: Parameters) extends PtwBundle {
     ptw_resp.tag := vpn(vpnLen - 1, sectortlbwidth)
     ptw_resp.pf := pf
     ptw_resp.af := af
+    ptw_resp.cf := cf // Bitmap Check Failed
     ptw_resp.v := resp_pte.perm.v
     ptw_resp.prefetch := DontCare
     ptw_resp.asid := asid

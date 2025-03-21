@@ -86,6 +86,13 @@ endif
 # embed debug module in top
 ifeq ($(DM_IN_TOP),1)
 COMMON_EXTRA_ARGS += --dm-in-top
+# enable or disable dfx manually
+ifeq ($(DFX),1)
+COMMON_EXTRA_ARGS += --dfx true
+else
+ifeq ($(DFX),0)
+COMMON_EXTRA_ARGS += --dfx false
+endif
 endif
 
 # L2 cache size in KB
@@ -98,9 +105,19 @@ ifneq ($(L3_CACHE_SIZE),)
 COMMON_EXTRA_ARGS += --l3-cache-size $(L3_CACHE_SIZE)
 endif
 
+# seperate bus for DebugModule
+ifeq ($(SEPERATE_DM_BUS),1)
+COMMON_EXTRA_ARGS += --seperate-dm-bus
+endif
+
 # configuration from yaml file
 ifneq ($(YAML_CONFIG),)
 COMMON_EXTRA_ARGS += --yaml-config $(YAML_CONFIG)
+endif
+
+# hart id bits
+ifneq ($(HART_ID_BITS),)
+COMMON_EXTRA_ARGS += --hartidbits $(HART_ID_BITS)
 endif
 
 # public args sumup
@@ -186,6 +203,10 @@ jar:
 
 test-jar:
 	mill -i xiangshan.test.assembly
+
+comp:
+	mill -i xiangshan.compile
+	mill -i xiangshan.test.compile
 
 $(TOP_V): $(SCALA_FILE)
 	mkdir -p $(@D)

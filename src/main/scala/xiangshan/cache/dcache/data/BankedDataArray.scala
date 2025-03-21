@@ -29,8 +29,9 @@ import org.chipsalliance.cde.config.Parameters
 import chisel3._
 import utils._
 import utility._
+import utility.sram.SRAMTemplate
 import chisel3.util._
-import freechips.rocketchip.tilelink.{ClientMetadata, TLClientParameters, TLEdgeOut}
+import utility.mbist.MbistPipeline
 import xiangshan.mem.LqPtr
 import xiangshan.{L1CacheErrorInfo, XSCoreParamsKey}
 
@@ -117,7 +118,8 @@ class DataSRAM(bankIdx: Int, wayIdx: Int)(implicit p: Parameters) extends DCache
     way = 1,
     shouldReset = false,
     holdRead = false,
-    singlePort = true
+    singlePort = true,
+    hasMbist = hasMbist
   ))
 
   data_sram.io.w.req.valid := io.w.en
@@ -184,7 +186,9 @@ class DataSRAMBank(index: Int)(implicit p: Parameters) extends DCacheModule {
       shouldReset = false,
       holdRead = false,
       singlePort = true,
-      withClockGate = true
+      withClockGate = true,
+      hasMbist = hasMbist,
+      suffix = Some("dcsh_dat")
     ))
   }
 
@@ -247,6 +251,9 @@ abstract class AbstractBankedDataArray(implicit p: Parameters) extends DCacheMod
     // main pipeline read / write line req
     val readline_intend = Input(Bool())
     val readline = Flipped(DecoupledIO(new L1BankedDataReadLineReq))
+    val readline_can_go = Input(Bool())
+    val readline_stall = Input(Bool())
+    val readline_can_resp = Input(Bool())
     val write = Flipped(DecoupledIO(new L1BankedDataWriteReq))
     val write_dup = Vec(DCacheBanks, Flipped(Decoupled(new L1BankedDataWriteReqCtrl)))
     // data for readline and loadpipe
@@ -360,7 +367,11 @@ class SramedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
   io.write.ready := true.B
   io.write_dup.foreach(_.ready := true.B)
 
-  val data_banks = List.tabulate(DCacheSetDiv)( k => List.tabulate(DCacheBanks)(i => List.tabulate(DCacheWays)(j => Module(new DataSRAM(i,j)))))
+  val data_banks = List.tabulate(DCacheSetDiv)( k => {
+    val banks = List.tabulate(DCacheBanks)(i => List.tabulate(DCacheWays)(j => Module(new DataSRAM(i,j))))
+    val mbistPl = MbistPipeline.PlaceMbistPipeline(1, s"MbistPipeDataSet$k", hasMbist)
+    banks
+  })
   data_banks.map(_.map(_.map(_.dump())))
 
   val way_en = Wire(Vec(LoadPipelineWidth, io.read(0).bits.way_en.cloneType))
@@ -649,7 +660,11 @@ class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
   io.write.ready := true.B
   io.write_dup.foreach(_.ready := true.B)
 
-  val data_banks = List.fill(DCacheSetDiv)(List.tabulate(DCacheBanks)(i => Module(new DataSRAMBank(i))))
+  val data_banks = Seq.tabulate(DCacheSetDiv, DCacheBanks)({(k, i) => Module(new DataSRAMBank(i))})
+  val mbistPl = MbistPipeline.PlaceMbistPipeline(1, s"MbistPipeDCacheData", hasMbist)
+  val mbistSramPorts = mbistPl.map(pl => Seq.tabulate(DCacheSetDiv, DCacheBanks, DCacheWays) ({ (i, j, k) =>
+    pl.toSRAM(i * DCacheBanks * DCacheWays + j * DCacheWays + k)
+  }))
   data_banks.map(_.map(_.dump()))
 
   val way_en = Wire(Vec(LoadPipelineWidth, io.read(0).bits.way_en.cloneType))
@@ -833,8 +848,9 @@ class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
         data_bank.io.r.addr := bank_set_addr
       }
       for (way_index <- 0 until DCacheWays) {
+        val mbistAck = mbistSramPorts.map(_(div_index)(bank_index)(way_index).ack).getOrElse(false.B)
         bank_result(div_index)(bank_index)(way_index).ecc := getECCFromEncWord(data_bank.io.r.data(way_index))
-        bank_result(div_index)(bank_index)(way_index).raw_data := getDataFromEncWord(data_bank.io.r.data(way_index)) ^ pseudo_data_toggle_mask(bank_index)
+        bank_result(div_index)(bank_index)(way_index).raw_data := getDataFromEncWord(data_bank.io.r.data(way_index)) ^ Mux(mbistAck, 0.U, pseudo_data_toggle_mask(bank_index))
 
         if (EnableDataEcc) {
           val ecc_data = bank_result(div_index)(bank_index)(way_index).asECCData()
@@ -879,15 +895,26 @@ class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
   })
 
   // read result: expose banked read result
+  private val mbist_r_way = OHToUInt(mbistSramPorts.map(_.flatMap(_.map(w => Cat(w.map(_.re).reverse))).reduce(_ | _)).getOrElse(0.U(DCacheWays.W)))
+  private val mbist_r_div = OHToUInt(mbistSramPorts.map(_.map(d => Cat(d.flatMap(w => w.map(_.re))).orR)).getOrElse(Seq.fill(DCacheSetDiv)(false.B)))
+  private val mbist_ack = mbistPl.map(_.mbist.ack).getOrElse(false.B)
+
   val readline_error_delayed = Wire(Vec(DCacheBanks, Bool()))
-  val readline_r_way_addr = RegEnable(OHToUInt(io.readline.bits.way_en), io.readline.valid)
+  val readline_r_way_addr = RegEnable(Mux(mbist_ack, mbist_r_way, OHToUInt(io.readline.bits.way_en)), io.readline.valid | mbist_ack)
   val readline_rr_way_addr = RegEnable(readline_r_way_addr, RegNext(io.readline.valid))
-  val readline_r_div_addr = RegEnable(line_div_addr, io.readline.valid)
+  val readline_r_div_addr = RegEnable(Mux(mbist_ack, mbist_r_div, line_div_addr), io.readline.valid | mbist_ack)
   val readline_rr_div_addr = RegEnable(readline_r_div_addr, RegNext(io.readline.valid))
-  (0 until DCacheBanks).map(i => {
-    io.readline_resp(i) := bank_result(readline_r_div_addr)(i)(readline_r_way_addr)
+  val readline_resp = Wire(io.readline_resp.cloneType)
+  (0 until DCacheBanks).foreach(i => {
+    mbistSramPorts.foreach(_.foreach(_(i).foreach(_.rdata := Cat(io.readline_resp(i).ecc, io.readline_resp(i).raw_data))))
+    readline_resp(i) := Mux(
+      io.readline_can_go | mbist_ack,
+      bank_result(readline_r_div_addr)(i)(readline_r_way_addr),
+      RegEnable(readline_resp(i), io.readline_stall | mbist_ack)
+    )
     readline_error_delayed(i) := bank_result(readline_rr_div_addr)(i)(readline_rr_way_addr).error_delayed
   })
+  io.readline_resp := RegEnable(readline_resp, io.readline_can_resp | mbist_ack)
   io.readline_error_delayed := RegNext(RegNext(io.readline.fire)) && readline_error_delayed.asUInt.orR
 
   // write data_banks & ecc_banks

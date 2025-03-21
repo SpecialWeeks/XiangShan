@@ -11,7 +11,7 @@ import utils.OptionWrapper
 import xiangshan.backend.fu.NewCSR.CSRBundles.{CSRCustomState, PrivState, RobCommitCSR}
 import xiangshan.backend.fu.NewCSR.CSRDefines._
 import xiangshan.backend.fu.NewCSR.CSREnumTypeImplicitCast._
-import xiangshan.backend.fu.NewCSR.CSREvents.{CSREvents, DretEventSinkBundle, EventUpdatePrivStateOutput, MNretEventSinkBundle, MretEventSinkBundle, SretEventSinkBundle, TargetPCBundle, TrapEntryDEventSinkBundle, TrapEntryEventInput, TrapEntryHSEventSinkBundle, TrapEntryMEventSinkBundle, TrapEntryMNEventSinkBundle, TrapEntryVSEventSinkBundle}
+import xiangshan.backend.fu.NewCSR.CSREvents.{CSREvents, DretEventSinkBundle, EventUpdatePrivStateOutput, MNretEventSinkBundle, MretEventSinkBundle, SretEventSinkBundle, SretEventSDTSinkBundle,  TargetPCBundle, TrapEntryDEventSinkBundle, TrapEntryEventInput, TrapEntryHSEventSinkBundle, TrapEntryMEventSinkBundle, TrapEntryMNEventSinkBundle, TrapEntryVSEventSinkBundle}
 import xiangshan.backend.fu.fpu.Bundles.Frm
 import xiangshan.backend.fu.vector.Bundles.{Vl, Vstart, Vxrm, Vxsat}
 import xiangshan.backend.fu.wrapper.CSRToDecode
@@ -204,6 +204,7 @@ class NewCSR(implicit val p: Parameters) extends Module
       val satp = new SatpBundle
       val vsatp = new SatpBundle
       val hgatp = new HgatpBundle
+      val mbmc = new MbmcBundle
       val mxr = Bool()
       val sum = Bool()
       val vmxr = Bool()
@@ -630,6 +631,11 @@ class NewCSR(implicit val p: Parameters) extends Module
       case _ =>
     }
     mod match {
+      case m: SretEventSDTSinkBundle =>
+        m.retFromSSDT := sretEvent.outSDT
+      case _ =>
+    }
+    mod match {
       case m: DretEventSinkBundle =>
         m.retFromD := dretEvent.out
       case _ =>
@@ -795,6 +801,11 @@ class NewCSR(implicit val p: Parameters) extends Module
         in.satp  := satp.regOut
         in.vsatp := vsatp.regOut
         in.hgatp := hgatp.regOut
+        if (HasBitmapCheck) {
+          in.mbmc := mbmc.get.regOut
+        } else {
+          in.mbmc := DontCare
+        }
 
         in.memExceptionVAddr := io.fromMem.excpVA
         in.memExceptionGPAddr := io.fromMem.excpGPA
@@ -894,8 +905,13 @@ class NewCSR(implicit val p: Parameters) extends Module
     (addr >= CSRs.cycle.U) && (addr <= CSRs.hpmcounter31.U)
   )
 
+  val resetSatp = WireInit(false.B)
   // flush
-  val resetSatp = Cat(Seq(satp, vsatp, hgatp).map(_.addr.U === addr)).orR && wenLegalReg // write to satp will cause the pipeline be flushed
+  if (HasBitmapCheck) {
+    resetSatp := Cat(Seq(satp, vsatp, hgatp, mbmc.get).map(_.addr.U === addr)).orR && wenLegalReg // write to satp will cause the pipeline be flushed
+  } else {
+    resetSatp := Cat(Seq(satp, vsatp, hgatp).map(_.addr.U === addr)).orR && wenLegalReg // write to satp will cause the pipeline be flushed
+  }
 
   val floatStatusOnOff = mstatus.w.wen && (
     mstatus.w.wdataFields.FS === ContextStatus.Off && mstatus.regOut.FS =/= ContextStatus.Off ||
@@ -1354,6 +1370,11 @@ class NewCSR(implicit val p: Parameters) extends Module
   io.tlb.satp := satp.rdata
   io.tlb.vsatp := vsatp.rdata
   io.tlb.hgatp := hgatp.rdata
+  if (HasBitmapCheck) {
+    io.tlb.mbmc := mbmc.get.rdata
+  } else {
+    io.tlb.mbmc := DontCare
+  }
   io.tlb.mxr  :=  mstatus.regOut.MXR.asBool
   io.tlb.sum  :=  mstatus.regOut.SUM.asBool
   io.tlb.vmxr := vsstatus.regOut.MXR.asBool
@@ -1565,11 +1586,11 @@ class NewCSR(implicit val p: Parameters) extends Module
 
     val diffNonRegInterruptPendingEvent = DifftestModule(new DiffNonRegInterruptPendingEvent)
     diffNonRegInterruptPendingEvent.coreid           := hartId
-    diffNonRegInterruptPendingEvent.valid            := platformIRPMeipChange || platformIRPMtipChange || platformIRPMsipChange ||
+    diffNonRegInterruptPendingEvent.valid            := (platformIRPMeipChange || platformIRPMtipChange || platformIRPMsipChange ||
                                                         platformIRPSeipChange || platformIRPStipChange ||
                                                         platformIRPVseipChange || platformIRPVstipChange ||
                                                         fromAIAMeipChange || fromAIASeipChange ||
-                                                        lcofiReqChange
+                                                        lcofiReqChange) & !reset.asBool
     diffNonRegInterruptPendingEvent.platformIRPMeip  := platformIRP.MEIP
     diffNonRegInterruptPendingEvent.platformIRPMtip  := platformIRP.MTIP
     diffNonRegInterruptPendingEvent.platformIRPMsip  := platformIRP.MSIP

@@ -16,7 +16,6 @@
 
 package xiangshan
 
-//import device.{IMSICAsync, MsiInfoBundle}
 import aia._
 import chisel3._
 import chisel3.util._
@@ -30,13 +29,14 @@ import freechips.rocketchip.devices.debug.ExportDebug
 import freechips.rocketchip.devices.debug.TLDebugModule
 import freechips.rocketchip.diplomacy._
 import freechips.rocketchip.interrupts._
-import freechips.rocketchip.tilelink.TLWidthWidget
-import freechips.rocketchip.tilelink.TLXbar
+import freechips.rocketchip.tilelink._
 import freechips.rocketchip.util._
 import org.chipsalliance.cde.config._
 import system.HasSoCParameter
-import utility.IntBuffer
-import utility.ResetGen
+//import device.{IMSICAsync, MsiInfoBundle}
+import coupledL2.tl2chi.{AsyncPortIO, CHIAsyncBridgeSource, PortIO}
+import utility.sram.SramBroadcastBundle
+import utility.{DFTResetSignals, IntBuffer, ResetGen}
 import xiangshan.backend.trace.TraceCoreInterface
 
 // This module is used for XSNoCTop for async time domain and divide different
@@ -59,10 +59,22 @@ class XSTileWrap()(implicit p: Parameters) extends LazyModule
   tile.debug_int_node := IntBuffer(3, cdc = true) := debugIntNode
   tile.plic_int_node :*= IntBuffer(3, cdc = true) :*= plicIntNode
   tile.nmi_int_node := IntBuffer(3, cdc = true) := nmiIntNode
-  beuIntNode        := IntBuffer()              := tile.beu_int_source
+  beuIntNode := IntBuffer() := tile.beu_int_source
+
+  // seperate DebugModule bus
+  val EnableDMAsync = EnableDMAsyncBridge.isDefined
+  println(s"SeperateDMBus = $SeperateDMBus")
+  println(s"EnableDMAsync = $EnableDMAsync")
+  // asynchronous bridge source node
+  val dmAsyncSourceOpt = Option.when(SeperateDMBus && EnableDMAsync)(LazyModule(new TLAsyncCrossingSource()))
+  dmAsyncSourceOpt.foreach(_.node := tile.sep_dm_opt.get)
+  // synchronous source node
+  val dmSyncSourceOpt = Option.when(SeperateDMBus && !EnableDMAsync)(TLTempNode())
+  dmSyncSourceOpt.foreach(_ := tile.sep_dm_opt.get)
+
   class XSTileWrapImp(wrapper: LazyModule) extends LazyRawModuleImp(wrapper) {
-    val clock     = IO(Input(Clock()))
-    val reset     = IO(Input(AsyncReset()))
+    val clock = IO(Input(Clock()))
+    val reset = IO(Input(AsyncReset()))
     val noc_reset = EnableCHIAsyncBridge.map(_ => IO(Input(AsyncReset())))
     val soc_reset = Option.when(!ClintAsyncFromCJ)(IO(Input(AsyncReset())))
     val i = Option.when(CHIAsyncFromCJ)(IO(new Bundle { // for customer J
@@ -102,15 +114,24 @@ class XSTileWrap()(implicit p: Parameters) extends LazyModule
           if (ClintAsyncFromCJ) Input(ValidIO(UInt(64.W))) else Flipped(new AsyncBundle(UInt(64.W), param))
         case None => Input(ValidIO(UInt(64.W)))
       }
+      val dft = if(hasMbist) Some(Input(new SramBroadcastBundle)) else None
+      val dft_reset = if(hasMbist) Some(Input(new DFTResetSignals())) else None
+      val l2_flush_en = Option.when(EnablePowerDown) (Output(Bool()))
+      val l2_flush_done = Option.when(EnablePowerDown) (Output(Bool()))
+      val pwrdown_req_n = Option.when(EnablePowerDown) (Input (Bool()))
+      val pwrdown_ack_n = Option.when(EnablePowerDown) (Output (Bool()))
+      val iso_en = Option.when(EnablePowerDown) (Input (Bool()))
     })
-    val hartResetReq = Wire(Bool()) // derive from io.hartResetReq or debugwrapper in top
-    io.hartResetReq.foreach(iohartResetReq => hartResetReq := iohartResetReq)
-    val reset_sync = withClockAndReset(clock, (reset.asBool || hartResetReq).asAsyncReset)(ResetGen())
-    val noc_reset_sync = EnableCHIAsyncBridge.map(_ => withClockAndReset(clock, noc_reset.get)(ResetGen()))
-    val soc_reset_sync = withClockAndReset(clock, soc_reset.get)(ResetGen())
 //    val reset_sync_ip = withClockAndReset(clock, reset)(ResetGen())
 //    val noc_reset_sync = EnableCHIAsyncBridge.map(_ => reset_sync_ip)
 //    val soc_reset_sync = reset_sync_ip
+    val hartResetReq = Wire(Bool()) // derive from io.hartResetReq or debugwrapper in top
+    io.hartResetReq.foreach(iohartResetReq => hartResetReq := iohartResetReq)
+
+    val reset_sync = withClockAndReset(clock, (reset.asBool || io.hartResetReq).asAsyncReset)(ResetGen(2, io.dft_reset))
+    val noc_reset_sync = EnableCHIAsyncBridge.map(_ => withClockAndReset(clock, noc_reset.get)(ResetGen(2, io.dft_reset)))
+    val soc_reset_sync = withClockAndReset(clock, soc_reset.get)(ResetGen(2, io.dft_reset))
+
     // override LazyRawModuleImp's clock and reset
     childClock := clock
     childReset := reset_sync
@@ -125,13 +146,18 @@ class XSTileWrap()(implicit p: Parameters) extends LazyModule
     // end :TBD zhaohong
 
     tile.module.io.reset_vector := io.reset_vector
-    io.cpu_halt                 := tile.module.io.cpu_halt
-    io.cpu_crtical_error        := tile.module.io.cpu_crtical_error
+    tile.module.io.dft.zip(io.dft).foreach({case(a, b) => a := b})
+    tile.module.io.dft_reset.zip(io.dft_reset).foreach({case(a, b) => a := b})
+    io.cpu_halt := tile.module.io.cpu_halt
+    io.cpu_crtical_error := tile.module.io.cpu_crtical_error
     io.hartIsInReset.foreach(_ := tile.module.io.hartIsInReset)
     io.traceCoreInterface <> tile.module.io.traceCoreInterface
     io.debugTopDown <> tile.module.io.debugTopDown
     tile.module.io.l3Miss := io.l3Miss
     tile.module.io.nodeID.foreach(_ := io.nodeID.get)
+    io.l2_flush_en.foreach { _ := tile.module.io.l2_flush_en.getOrElse(false.B) }
+    io.l2_flush_done.foreach { _ := tile.module.io.l2_flush_done.getOrElse(false.B) }
+    io.pwrdown_ack_n.foreach { _ := true.B }
 
     // instance :TL DebugModule
 //    val debugModule = Option.when(UseDMInTop){
@@ -192,11 +218,17 @@ class XSTileWrap()(implicit p: Parameters) extends LazyModule
         io.chi <> tile.module.io.chi.get
     }
 
+    // Seperate DebugModule TL Async Queue Source
+    if (SeperateDMBus && EnableDMAsync) {
+      dmAsyncSourceOpt.get.module.clock := clock
+      dmAsyncSourceOpt.get.module.reset := soc_reset_sync
+    }
+
     withClockAndReset(clock, reset_sync) {
       // Modules are reset one by one
       // reset ----> SYNC --> XSTile
       val resetChain = Seq(Seq(tile.module))
-      ResetGen(resetChain, reset_sync, !debugOpts.FPGAPlatform)
+      ResetGen(resetChain, reset_sync, !debugOpts.FPGAPlatform, io.dft_reset)
     }
     dontTouch(io.hartId)
 //    dontTouch(io.msiInfo)

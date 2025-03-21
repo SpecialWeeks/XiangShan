@@ -19,7 +19,7 @@ package system
 import org.chipsalliance.cde.config.{Field, Parameters}
 import chisel3._
 import chisel3.util._
-import device.{DebugModule, TLPMA, TLPMAIO}
+import device.{DebugModule, TLPMA, TLPMAIO, AXI4MemEncrypt}
 import freechips.rocketchip.amba.axi4._
 import freechips.rocketchip.devices.debug.DebugModuleKey
 import freechips.rocketchip.devices.tilelink._
@@ -38,6 +38,16 @@ import coupledL2.tl2chi.CHIIssue
 import openLLC.OpenLLCParam
 
 case object SoCParamsKey extends Field[SoCParameters]
+case object CVMParamskey extends Field[CVMParameters]
+
+case class CVMParameters
+(
+  MEMENCRange: AddressSet = AddressSet(0x38030000L, 0xfff),
+  KeyIDBits: Int = 0,
+  MemencPipes: Int = 4,
+  HasMEMencryption: Boolean = false,
+  HasDelayNoencryption: Boolean = false, // Test specific
+)
 
 case class SoCParameters
 (
@@ -85,7 +95,9 @@ case class SoCParameters
   NumIRSrc: Int = 256,
   UseXSNoCTop: Boolean = false,
   UseXSNoCDiffTop: Boolean = false,
+  UseXSTileDiffTop: Boolean = false,
   IMSICUseTL: Boolean = false,
+  SeperateDMBus: Boolean = false,
   EnableCHIAsyncBridge: Option[AsyncQueueParams] = Some(AsyncQueueParams(depth = 16, sync = 3, safe = false)),
   EnableClintAsyncBridge: Option[AsyncQueueParams] = Some(AsyncQueueParams(depth = 1, sync = 3, safe = false)),
   IMSICUseHalf: Boolean = false,
@@ -93,6 +105,9 @@ case class SoCParameters
   CHIAsyncFromCJ: Boolean = false, //CJ- customer ..
   ClintAsyncFromCJ: Boolean = false,
   HasSECIMSIC:Boolean = false // 1:instance IMSIC twice,one is for tee, one is for ree
+  EnableDMAsyncBridge: Option[AsyncQueueParams] = Some(AsyncQueueParams(depth = 1, sync = 3, safe = false)),
+  WFIClockGate: Boolean = false,
+  EnablePowerDown: Boolean = false
 ){
   require(
     L3CacheParamsOpt.isDefined ^ OpenLLCParamsOpt.isDefined || L3CacheParamsOpt.isEmpty && OpenLLCParamsOpt.isEmpty,
@@ -110,6 +125,7 @@ trait HasSoCParameter {
   implicit val p: Parameters
 
   val soc = p(SoCParamsKey)
+  val cvm = p(CVMParamskey)
   val debugOpts = p(DebugOptionsKey)
   val tiles = p(XSTileKey)
   val enableCHI = p(EnableCHI)
@@ -142,6 +158,8 @@ trait HasSoCParameter {
 
   val NumIRSrc = soc.NumIRSrc
 
+  val SeperateDMBus = soc.SeperateDMBus
+
   val EnableCHIAsyncBridge = if (enableCHI && soc.EnableCHIAsyncBridge.isDefined)
     soc.EnableCHIAsyncBridge else None
   val EnableClintAsyncBridge = soc.EnableClintAsyncBridge
@@ -149,11 +167,21 @@ trait HasSoCParameter {
   val UseDMInTop = soc.UseDMInTop
   val CHIAsyncFromCJ = soc.CHIAsyncFromCJ
   val ClintAsyncFromCJ = soc.ClintAsyncFromCJ
+  val EnableDMAsyncBridge = if (SeperateDMBus && soc.EnableDMAsyncBridge.isDefined)
+    soc.EnableDMAsyncBridge else None
+
+  val WFIClockGate = soc.WFIClockGate
+  val EnablePowerDown = soc.EnablePowerDown
+
+  def HasMEMencryption = cvm.HasMEMencryption
+  require((cvm.HasMEMencryption && (cvm.KeyIDBits > 0)) || (!cvm.HasMEMencryption && (cvm.KeyIDBits == 0)),
+    "HasMEMencryption most set with KeyIDBits > 0")
 }
 
 trait HasPeripheralRanges {
   implicit val p: Parameters
 
+  private def cvm = p(CVMParamskey)
   private def soc = p(SoCParamsKey)
   private def dm = p(DebugModuleKey)
   private def pmParams = p(PMParameKey)
@@ -171,6 +199,11 @@ trait HasPeripheralRanges {
   ) ++ (
     if (soc.L3CacheParamsOpt.map(_.ctrl.isDefined).getOrElse(false))
       Map("L3CTL" -> AddressSet(soc.L3CacheParamsOpt.get.ctrl.get.address, 0xffff))
+    else
+      Map()
+  ) ++ (
+    if (cvm.HasMEMencryption)
+      Map("MEMENC"  -> cvm.MEMENCRange)
     else
       Map()
   )
@@ -283,15 +316,30 @@ trait HaveAXI4MemPort {
       TLBuffer.chainNode(2) :=
       mem_xbar
   }
+  val axi4memencrpty = Option.when(HasMEMencryption)(LazyModule(new AXI4MemEncrypt(cvm.MEMENCRange)))
+  if (HasMEMencryption) {
+    memAXI4SlaveNode :=
+      AXI4Buffer() :=
+      AXI4Buffer() :=
+      AXI4Buffer() :=
+      AXI4IdIndexer(idBits = 14) :=
+      AXI4UserYanker() :=
+      axi4memencrpty.get.node
 
-  memAXI4SlaveNode :=
-    AXI4Buffer() :=
-    AXI4Buffer() :=
-    AXI4Buffer() :=
-    AXI4IdIndexer(idBits = 14) :=
-    AXI4UserYanker() :=
-    AXI4Deinterleaver(L3BlockSize) :=
-    axi4mem_node
+    axi4memencrpty.get.node :=
+      AXI4Deinterleaver(L3BlockSize) :=
+      axi4mem_node
+  } else {
+    memAXI4SlaveNode :=
+      AXI4Buffer() :=
+      AXI4Buffer() :=
+      AXI4Buffer() :=
+      AXI4IdIndexer(idBits = 14) :=
+      AXI4UserYanker() :=
+      AXI4Deinterleaver(L3BlockSize) :=
+      axi4mem_node
+  }
+
 
   val memory = InModuleBody {
     memAXI4SlaveNode.makeIOs()
@@ -439,14 +487,22 @@ class MemMisc()(implicit p: Parameters) extends BaseSoC
   else { pll_node := peripheralXbar.get }
 
   val debugModule = LazyModule(new DebugModule(NumCores)(p))
+  val debugModuleXbarOpt = Option.when(SeperateDMBus)(TLXbar())
   if (enableCHI) {
-    debugModule.debug.node := device_xbar.get
-    // TODO: l3_xbar
+    if (SeperateDMBus) {
+      debugModule.debug.node := debugModuleXbarOpt.get
+    } else {
+      debugModule.debug.node := device_xbar.get
+    }
     debugModule.debug.dmInner.dmInner.sb2tlOpt.foreach { sb2tl =>
       error_xbar.get := sb2tl.node
     }
   } else {
-    debugModule.debug.node := peripheralXbar.get
+    if (SeperateDMBus) {
+      debugModule.debug.node := debugModuleXbarOpt.get
+    } else {
+      debugModule.debug.node := peripheralXbar.get
+    }
     debugModule.debug.dmInner.dmInner.sb2tlOpt.foreach { sb2tl  =>
       l3_xbar.get := TLBuffer() := TLWidthWidget(1) := sb2tl.node
     }
@@ -455,8 +511,14 @@ class MemMisc()(implicit p: Parameters) extends BaseSoC
   val pma = LazyModule(new TLPMA)
   if (enableCHI) {
     pma.node := TLBuffer.chainNode(4) := device_xbar.get
+    if (HasMEMencryption) {
+      axi4memencrpty.get.ctrl_node := TLToAPB() := device_xbar.get
+    }
   } else {
     pma.node := TLBuffer.chainNode(4) := peripheralXbar.get
+    if (HasMEMencryption) {
+      axi4memencrpty.get.ctrl_node := TLToAPB() := peripheralXbar.get
+    }
   }
 
   class SoCMiscImp(wrapper: LazyModule) extends LazyModuleImp(wrapper) {
@@ -481,6 +543,11 @@ class MemMisc()(implicit p: Parameters) extends BaseSoC
 
     pma.module.io <> cacheable_check
 
+    if (HasMEMencryption) {
+      val cnt = Counter(true.B, 8)._1
+      axi4memencrpty.get.module.io.random_val := axi4memencrpty.get.module.io.random_req && cnt(2).asBool
+      axi4memencrpty.get.module.io.random_data := cnt(0).asBool
+    }
     // positive edge sampling of the lower-speed rtc_clock
     val rtcTick = RegInit(0.U(3.W))
     rtcTick := Cat(rtcTick(1, 0), rtc_clock)

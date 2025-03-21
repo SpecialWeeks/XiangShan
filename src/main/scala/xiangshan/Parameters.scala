@@ -21,6 +21,7 @@ import chisel3._
 import chisel3.util._
 import huancun._
 import system.SoCParamsKey
+import system.CVMParamskey
 import xiangshan.backend.datapath.RdConfig._
 import xiangshan.backend.datapath.WbConfig._
 import xiangshan.backend.exu.ExeUnitParams
@@ -60,6 +61,8 @@ case class XSCoreParameters
   VLEN: Int = 128,
   ELEN: Int = 64,
   HSXLEN: Int = 64,
+  HasBitmapCheck: Boolean = false,
+  HasBitmapCheckDefault: Boolean = false,
   HasMExtension: Boolean = true,
   HasCExtension: Boolean = true,
   HasHExtension: Boolean = true,
@@ -239,7 +242,7 @@ case class XSCoreParameters
   EnableLdVioCheckAfterReset: Boolean = true,
   EnableSoftPrefetchAfterReset: Boolean = true,
   EnableCacheErrorAfterReset: Boolean = true,
-  EnableAccurateLoadError: Boolean = false,
+  EnableAccurateLoadError: Boolean = true,
   EnableUncacheWriteOutstanding: Boolean = false,
   EnableHardwareStoreMisalign: Boolean = true,
   EnableHardwareLoadMisalign: Boolean = true,
@@ -351,7 +354,8 @@ case class XSCoreParameters
   usePTWRepeater: Boolean = false,
   softTLB: Boolean = false, // dpi-c l1tlb debug only
   softPTW: Boolean = false, // dpi-c l2tlb debug only
-  softPTWDelay: Int = 1
+  softPTWDelay: Int = 1,
+  hasMbist:Boolean = false
 ){
   def ISABase = "rv64i"
   def ISAExtensions = Seq(
@@ -569,6 +573,7 @@ trait HasXSParameter {
 
   def PAddrBits = p(SoCParamsKey).PAddrBits // PAddrBits is Phyical Memory addr bits
   def PmemRanges = p(SoCParamsKey).PmemRanges
+  def KeyIDBits = p(CVMParamskey).KeyIDBits
   final val PageOffsetWidth = 12
   def NodeIDWidth = p(SoCParamsKey).NodeIDWidthList(p(CHIIssue)) // NodeID width among NoC
 
@@ -586,6 +591,8 @@ trait HasXSParameter {
   def hartIdLen = p(MaxHartIdBits)
   val xLen = XLEN
 
+  def HasBitmapCheck = coreParams.HasBitmapCheck
+  def HasBitmapCheckDefault = coreParams.HasBitmapCheckDefault
   def HasMExtension = coreParams.HasMExtension
   def HasCExtension = coreParams.HasCExtension
   def HasHExtension = coreParams.HasHExtension
@@ -768,6 +775,8 @@ trait HasXSParameter {
   def LoadUncacheBufferSize = coreParams.LoadUncacheBufferSize
   def LoadQueueNWriteBanks = coreParams.LoadQueueNWriteBanks
   def StoreQueueSize = coreParams.StoreQueueSize
+  def StoreQueueForceWriteSbufferUpper = coreParams.StoreQueueSize - 4
+  def StoreQueueForceWriteSbufferLower = StoreQueueForceWriteSbufferUpper - 5
   def VirtualLoadQueueMaxStoreQueueSize = VirtualLoadQueueSize max StoreQueueSize
   def StoreQueueNWriteBanks = coreParams.StoreQueueNWriteBanks
   def StoreQueueForwardWithMask = coreParams.StoreQueueForwardWithMask
@@ -896,4 +905,6 @@ trait HasXSParameter {
   def IretireWidthInPipe     = log2Up(RenameWidth * 2)
   def IretireWidthCompressed = log2Up(RenameWidth * CommitWidth * 2)
   def IlastsizeWidth         = coreParams.traceParams.IlastsizeWidth
+
+  def hasMbist               = coreParams.hasMbist
 }

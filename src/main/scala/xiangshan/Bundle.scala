@@ -514,10 +514,30 @@ class TlbHgatpBundle(implicit p: Parameters) extends HgatpStruct {
   }
 }
 
+// add mbmc csr
+class MbmcStruct(implicit p: Parameters) extends XSBundle {
+  val BME = UInt(1.W)
+  val CMODE = UInt(1.W)
+  val BCLEAR = UInt(1.W)
+  val BMA = UInt(58.W)
+}
+
+class TlbMbmcBundle(implicit p: Parameters) extends MbmcStruct {
+  def apply(mbmc_value: UInt): Unit = {
+    require(mbmc_value.getWidth == XLEN)
+    val mc = mbmc_value.asTypeOf(new MbmcStruct)
+    BME := mc.BME
+    CMODE := mc.CMODE
+    BCLEAR := mc.BCLEAR
+    BMA := mc.BMA
+  }
+}
+
 class TlbCsrBundle(implicit p: Parameters) extends XSBundle {
   val satp = new TlbSatpBundle()
   val vsatp = new TlbSatpBundle()
   val hgatp = new TlbHgatpBundle()
+  val mbmc = new TlbMbmcBundle()
   val priv = new Bundle {
     val mxr = Bool()
     val sum = Bool()
@@ -788,4 +808,15 @@ class TopDownInfo(implicit p: Parameters) extends XSBundle {
 class TopDownFromL2Top(implicit p: Parameters) extends XSBundle {
   val l2Miss = Bool()
   val l3Miss = Bool()
+}
+
+class LowPowerIO(implicit p: Parameters) extends Bundle {
+  /* i_*: SoC -> CPU   o_*: CPU -> SoC */
+  val o_cpu_no_op = Output(Bool()) 
+  //physical power down 
+  val i_cpu_pwrdown_req_n = Input(Bool())
+  val o_cpu_pwrdown_ack_n = Output(Bool())
+  // power on/off sequence control for Core iso/rst
+  val i_cpu_iso_en= Input(Bool())
+  val i_cpu_sw_rst_n = Input(Bool())
 }

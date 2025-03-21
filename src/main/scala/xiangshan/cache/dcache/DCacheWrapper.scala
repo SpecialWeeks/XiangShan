@@ -1066,7 +1066,7 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
     Seq(mainPipe.io.error) // store / misc error
   val error_valid = errors.map(e => e.valid).reduce(_|_)
   io.error.bits <> RegEnable(
-    Mux1H(errors.map(e => RegNext(e.valid) -> RegEnable(e.bits, e.valid))),
+    ParallelMux(errors.map(e => RegNext(e.valid) -> RegEnable(e.bits, e.valid))),
     RegNext(error_valid))
   io.error.valid := RegNext(RegNext(error_valid, init = false.B), init = false.B)
 
@@ -1286,6 +1286,9 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
   }
 
   bankedDataArray.io.readline <> mainPipe.io.data_readline
+  bankedDataArray.io.readline_can_go := mainPipe.io.data_readline_can_go
+  bankedDataArray.io.readline_stall := mainPipe.io.data_readline_stall
+  bankedDataArray.io.readline_can_resp := mainPipe.io.data_readline_can_resp
   bankedDataArray.io.readline_intend := mainPipe.io.data_read_intend
   mainPipe.io.readline_error_delayed := bankedDataArray.io.readline_error_delayed
   mainPipe.io.data_resp := bankedDataArray.io.readline_resp
@@ -1494,8 +1497,6 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
   missReadyGen.io.queryMQ <> missQueue.io.queryMQ
   io.cmoOpReq <> missQueue.io.cmo_req
   io.cmoOpResp <> missQueue.io.cmo_resp
-
-  for (w <- 0 until LoadPipelineWidth) { ldu(w).io.mq_enq_cancel := missQueue.io.mq_enq_cancel }
 
   XSPerfAccumulate("miss_queue_fire", PopCount(VecInit(missReqArb.io.in.map(_.fire))) >= 1.U)
   XSPerfAccumulate("miss_queue_muti_fire", PopCount(VecInit(missReqArb.io.in.map(_.fire))) > 1.U)

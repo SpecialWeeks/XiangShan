@@ -346,14 +346,14 @@ class UncacheImp(outer: Uncache)extends LazyModuleImp(outer)
   assert(PopCount(e0_mergeVec) <= 1.U, "Uncache buffer should not merge multiple entries")
 
   val e0_invalidVec = sizeMap(i => !states(i).isValid())
-  val e0_reject = do_uarch_drain || !e0_invalidVec.asUInt.orR || e0_rejectVec.reduce(_ || _)
   val (e0_mergeIdx, e0_canMerge) = PriorityEncoderWithFlag(e0_mergeVec)
   val (e0_allocIdx, e0_canAlloc) = PriorityEncoderWithFlag(e0_invalidVec)
   val e0_allocWaitSame = e0_allocWaitSameVec.reduce(_ || _)
   val e0_sid = Mux(e0_canMerge, e0_mergeIdx, e0_allocIdx)
+  val e0_reject = do_uarch_drain || (!e0_canMerge && !e0_invalidVec.asUInt.orR) || e0_rejectVec.reduce(_ || _)
 
   // e0_fire is used to guarantee that it will not be rejected
-  when(e0_canMerge && e0_fire){
+  when(e0_canMerge && e0_req_valid){
     entries(e0_mergeIdx).update(e0_req)
   }.elsewhen(e0_canAlloc && e0_fire){
     entries(e0_allocIdx).set(e0_req)
@@ -427,7 +427,7 @@ class UncacheImp(outer: Uncache)extends LazyModuleImp(outer)
 
     // q0 should judge whether wait same block
     (0 until UncacheBufferSize).map(j =>
-      when(states(j).isValid() && !states(j).isWaitReturn() && addrMatch(q0_entry, entries(j))){
+      when(q0_canSentIdx =/= j.U && states(j).isValid() && !states(j).isWaitReturn() && addrMatch(q0_entry, entries(j))){
         states(j).setWaitSame(true.B)
       }
     )
@@ -449,7 +449,7 @@ class UncacheImp(outer: Uncache)extends LazyModuleImp(outer)
 
     // remove state of wait same block
     (0 until UncacheBufferSize).map(j =>
-      when(states(j).isValid() && states(j).isWaitSame() && addrMatch(entries(id), entries(j))){
+      when(id =/= j.U && states(j).isValid() && states(j).isWaitSame() && addrMatch(entries(id), entries(j))){
         states(j).setWaitSame(false.B)
       }
     )
@@ -500,8 +500,8 @@ class UncacheImp(outer: Uncache)extends LazyModuleImp(outer)
     /* f0 */
     // vaddr match
     val f0_vtagMatches = sizeMap(w => addrMatch(entries(w).vaddr, forward.vaddr))
-    val f0_flyTagMatches = sizeMap(w => f0_vtagMatches(w) && f0_validMask(w) && f0_fwdValid && states(i).isFwdOld)
-    val f0_idleTagMatches = sizeMap(w => f0_vtagMatches(w) && f0_validMask(w) && f0_fwdValid && states(i).isFwdNew)
+    val f0_flyTagMatches = sizeMap(w => f0_vtagMatches(w) && f0_validMask(w) && f0_fwdValid && states(w).isFwdOld())
+    val f0_idleTagMatches = sizeMap(w => f0_vtagMatches(w) && f0_validMask(w) && f0_fwdValid && states(w).isFwdNew())
     // ONLY for fast use to get better timing
     val f0_flyMaskFast = shiftMaskToHigh(
       forward.vaddr,
@@ -530,14 +530,14 @@ class UncacheImp(outer: Uncache)extends LazyModuleImp(outer)
     f1_tagMismatchVec(i) := sizeMap(w =>
       RegEnable(f0_vtagMatches(w), f0_fwdValid) =/= f1_ptagMatches(w) && RegEnable(f0_validMask(w), f0_fwdValid) && f1_fwdValid
     ).asUInt.orR
-    when(f1_tagMismatchVec(i)) {
-      XSDebug("forward tag mismatch: pmatch %x vmatch %x vaddr %x paddr %x\n",
-        f1_ptagMatches.asUInt,
-        RegEnable(f0_vtagMatches.asUInt, f0_fwdValid),
-        RegEnable(forward.vaddr, f0_fwdValid),
-        RegEnable(forward.paddr, f0_fwdValid)
-      )
-    }
+    XSDebug(
+      f1_tagMismatchVec(i),
+      "forward tag mismatch: pmatch %x vmatch %x vaddr %x paddr %x\n",
+      f1_ptagMatches.asUInt,
+      RegEnable(f0_vtagMatches.asUInt, f0_fwdValid),
+      RegEnable(forward.vaddr, f0_fwdValid),
+      RegEnable(forward.paddr, f0_fwdValid)
+    )
     // response
     forward.addrInvalid := false.B // addr in ubuffer is always ready
     forward.dataInvalid := false.B // data in ubuffer is always ready
