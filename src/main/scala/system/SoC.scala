@@ -90,8 +90,8 @@ case class SoCParameters
   EnableClintAsyncBridge: Option[AsyncQueueParams] = Some(AsyncQueueParams(depth = 1, sync = 3, safe = false)),
   IMSICUseHalf: Boolean = false,
   UseDMInTop: Boolean = false,
-  CHIAsyncFromSPMT: Boolean = false, //SPMT- Spacemit jindieshikong
-  ClintAsyncFromSPMT: Boolean = false,
+  CHIAsyncFromCJ: Boolean = false, //CJ- customer ..
+  ClintAsyncFromCJ: Boolean = false,
   HasSECIMSIC:Boolean = false // 1:instance IMSIC twice,one is for tee, one is for ree
 ){
   require(
@@ -147,8 +147,8 @@ trait HasSoCParameter {
   val EnableClintAsyncBridge = soc.EnableClintAsyncBridge
   val IMSICUseHalf = soc.IMSICUseHalf
   val UseDMInTop = soc.UseDMInTop
-  val CHIAsyncFromSPMT = soc.CHIAsyncFromSPMT
-  val ClintAsyncFromSPMT = soc.ClintAsyncFromSPMT
+  val CHIAsyncFromCJ = soc.CHIAsyncFromCJ
+  val ClintAsyncFromCJ = soc.ClintAsyncFromCJ
 }
 
 trait HasPeripheralRanges {

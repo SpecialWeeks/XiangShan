@@ -5,7 +5,7 @@ import chisel3.util.{HasBlackBoxResource, ValidIO}
 
 
 
-class ClintAsyncSPMT extends Module {
+class ClintAsyncCJ extends Module {
   val io = IO(new Bundle {
     val i_time = Input(ValidIO(UInt(64.W)))
     val o_time = Output(ValidIO(UInt(64.W)))

@@ -9,7 +9,7 @@ import system.HasSoCParameter
 import coupledL2.tl2chi
 
 //icn
-class CHIAsyncIOSPMT extends Bundle {
+class CHIAsyncIOCJ extends Bundle {
   val WPECITMSOIA = Input(Bool())
   val WOCIATISPEM = Input(UInt(3136.W)) //[3135:0]
   val WCSIIAPOMTE = Input(UInt(8.W)) //[7   :0]
@@ -44,7 +44,7 @@ class CHIAsyncIOSPMT extends Bundle {
   val WCTMIPOEIAS = Output(Bool())
 }
 
-class CHIAsyncICNSPMT()(implicit p: Parameters) extends Module {
+class CHIAsyncICNCJ()(implicit p: Parameters) extends Module {
 
 //  val clock = IO(Input(Clock()))
 //  val reset = IO(Input(Reset()))
@@ -55,7 +55,7 @@ class CHIAsyncICNSPMT()(implicit p: Parameters) extends Module {
     }
   })
   val io = IO(new Bundle {
-    val cdb = new CHIAsyncIOSPMT
+    val cdb = new CHIAsyncIOCJ
     val chi = new PortIO
   })
   val cdbicn = Module(new xh_cdb_icn)
@@ -134,7 +134,7 @@ class CHIAsyncICNSPMT()(implicit p: Parameters) extends Module {
   io.cdb.WCTMIPOEIAS := cdbicn.WCTMIPOEIAS
 }
 
-class xh_cdb_icn extends BlackBox with HasBlackBoxResource {
+class xh_cdb_icn extends BlackBox {
   //chi cdb async interface
   val WPECITMSOIA = Input(Bool())
   val WOCIATISPEM = Input(UInt(3136.W)) //[3135:0]
@@ -208,10 +208,9 @@ class xh_cdb_icn extends BlackBox with HasBlackBoxResource {
   val WIOAICSTEPM = Output(Bool())
   val WPSCIMTAEOI = Output(Bool())
   val WTAEIMSICOP = Output(Bool())
-  addResource("/aia/src/rtl/imsic/xh_cdb_icn.v")
 }
 
-class CHIAsyncDEVSPMT()(implicit p: Parameters) extends Module {
+class CHIAsyncDEVCJ()(implicit p: Parameters) extends Module {
   val i = IO(new Bundle {
     val dft = new Bundle {
       val icg_scan_en = Input(Bool())
@@ -219,7 +218,7 @@ class CHIAsyncDEVSPMT()(implicit p: Parameters) extends Module {
     }
   })
   val io = IO(new Bundle {
-    val cdb = Flipped(new CHIAsyncIOSPMT)
+    val cdb = Flipped(new CHIAsyncIOCJ)
     val chi = Flipped(new PortIO)
   })
   //---instance cdb bridge ---
@@ -301,7 +300,7 @@ class CHIAsyncDEVSPMT()(implicit p: Parameters) extends Module {
   cdbdev.WCTMIPOEIAS := io.cdb.WCTMIPOEIAS
 }
 
-class xh_cdb_dev extends BlackBox with HasBlackBoxResource {
+class xh_cdb_dev extends BlackBox {
   val WMOTSECIPIA = IO(Input(Bool()))
   val WOMSCAIEIPT = IO(Input(Bool()))
   val WSMOACPETII = IO(Input(Bool()))
@@ -375,7 +374,6 @@ class xh_cdb_dev extends BlackBox with HasBlackBoxResource {
   val WMACIIEPOTS = IO(Output(UInt(8.W))) //  [7   :0]
   val WIIPETAOCMS = IO(Output(Bool()))
   val WTOMIAPSICE = IO(Output(Bool()))
-  addResource("/aia/src/rtl/imsic/xh_cdb_dev.v")
 }
 
 

@@ -64,14 +64,20 @@ class XSTileWrap()(implicit p: Parameters) extends LazyModule
     val clock     = IO(Input(Clock()))
     val reset     = IO(Input(AsyncReset()))
     val noc_reset = EnableCHIAsyncBridge.map(_ => IO(Input(AsyncReset())))
-    val soc_reset = Option.when(!ClintAsyncFromSPMT)(IO(Input(AsyncReset())))
+    val soc_reset = Option.when(!ClintAsyncFromCJ)(IO(Input(AsyncReset())))
+    val i = Option.when(CHIAsyncFromCJ)(IO(new Bundle { // for customer J
+      val dft = Input(new Bundle {
+        val icg_scan_en = Bool()
+        val scan_enable = Bool()
+      })
+    }))
     val io = IO(new Bundle {
       val hartId            = Input(UInt(hartIdLen.W))
       val msiinfo           = new MSITransBundle(aia.IMSICParams())
       val reset_vector      = Input(UInt(PAddrBits.W))
       val cpu_halt          = Output(Bool())
       val cpu_crtical_error = Output(Bool())
-      // ==UseDMInTop start: 1- DebugModule is integrated in XSTOP, only spacemit need it,other 0.==
+      // ==UseDMInTop start: 1- DebugModule is integrated in XSTOP, only customer J need it,other 0.==
       val hartResetReq  = Option.when(!UseDMInTop)(Input(Bool()))
       val hartIsInReset = Option.when(!UseDMInTop)(Output(Bool()))
       val dm = Option.when(UseDMInTop)(new Bundle {
@@ -87,22 +93,24 @@ class XSTileWrap()(implicit p: Parameters) extends LazyModule
 
       val l3Miss = Input(Bool())
       val chi = EnableCHIAsyncBridge match {
-        case Some(param) => if (CHIAsyncFromSPMT) new CHIAsyncIOSPMT() else new AsyncPortIO(param)
+        case Some(param) => if (CHIAsyncFromCJ) new CHIAsyncIOCJ() else new AsyncPortIO(param)
         case None        => new PortIO
       }
       val nodeID = if (enableCHI) Some(Input(UInt(NodeIDWidth.W))) else None
       val clintTime = EnableClintAsyncBridge match {
         case Some(param) =>
-          if (ClintAsyncFromSPMT) Input(ValidIO(UInt(64.W))) else Flipped(new AsyncBundle(UInt(64.W), param))
+          if (ClintAsyncFromCJ) Input(ValidIO(UInt(64.W))) else Flipped(new AsyncBundle(UInt(64.W), param))
         case None => Input(ValidIO(UInt(64.W)))
       }
     })
     val hartResetReq = Wire(Bool()) // derive from io.hartResetReq or debugwrapper in top
     io.hartResetReq.foreach(iohartResetReq => hartResetReq := iohartResetReq)
-    val reset_sync     = withClockAndReset(clock, (reset.asBool || hartResetReq).asAsyncReset)(ResetGen())
+    val reset_sync = withClockAndReset(clock, (reset.asBool || hartResetReq).asAsyncReset)(ResetGen())
     val noc_reset_sync = EnableCHIAsyncBridge.map(_ => withClockAndReset(clock, noc_reset.get)(ResetGen()))
     val soc_reset_sync = withClockAndReset(clock, soc_reset.get)(ResetGen())
-
+//    val reset_sync_ip = withClockAndReset(clock, reset)(ResetGen())
+//    val noc_reset_sync = EnableCHIAsyncBridge.map(_ => reset_sync_ip)
+//    val soc_reset_sync = reset_sync_ip
     // override LazyRawModuleImp's clock and reset
     childClock := clock
     childReset := reset_sync
@@ -152,26 +160,34 @@ class XSTileWrap()(implicit p: Parameters) extends LazyModule
         iodm.dmi.map(_ <> debugModule.io.debugIO.clockeddmi.get)
       }
     }
-
     // CLINT Async Queue Sink
-    EnableClintAsyncBridge match {
-      case Some(param) =>
+    (EnableClintAsyncBridge, ClintAsyncFromCJ) match {
+      case (Some(param), false) =>
         val sink = withClockAndReset(clock, soc_reset_sync)(Module(new AsyncQueueSink(UInt(64.W), param)))
         sink.io.async <> io.clintTime
-        sink.io.deq.ready              := true.B
+        sink.io.deq.ready := true.B
         tile.module.io.clintTime.valid := sink.io.deq.valid
-        tile.module.io.clintTime.bits  := sink.io.deq.bits
-      case None =>
+        tile.module.io.clintTime.bits := sink.io.deq.bits
+      case (Some(param), true) =>   //clint async proc ip is from customer J
+        val sink = withClockAndReset(clock, soc_reset_sync)(Module(new ClintAsyncCJ()))
+        sink.io.i_time <> io.clintTime
+        tile.module.io.clintTime := sink.io.o_time
+      case _ =>
         tile.module.io.clintTime := io.clintTime
     }
-
     // CHI Async Queue Source
-    EnableCHIAsyncBridge match {
-      case Some(param) =>
+    (EnableCHIAsyncBridge, CHIAsyncFromCJ) match {
+      case (Some(param), true) => // chiasync bridge can be provided by customer J.
+        val source = withClockAndReset(clock, noc_reset_sync.get)(Module(new CHIAsyncDEVCJ()))
+        source.i.dft.icg_scan_en := i.get.dft.icg_scan_en
+        source.i.dft.scan_enable := i.get.dft.scan_enable
+        source.io.chi <> tile.module.io.chi.get
+        io.chi <> source.io.cdb
+      case (Some(param), false) =>
         val source = withClockAndReset(clock, noc_reset_sync.get)(Module(new CHIAsyncBridgeSource(param)))
         source.io.enq <> tile.module.io.chi.get
         io.chi <> source.io.async
-      case None =>
+      case _ =>
         require(enableCHI)
         io.chi <> tile.module.io.chi.get
     }

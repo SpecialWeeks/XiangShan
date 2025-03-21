@@ -112,9 +112,9 @@ class XSNoCTop()(implicit p: Parameters) extends BaseXSSoc with HasSoCParameter
     val reset = IO(Input(AsyncReset()))
     val noc_clock = EnableCHIAsyncBridge.map(_ => IO(Input(Clock())))
     val noc_reset = EnableCHIAsyncBridge.map(_ => IO(Input(AsyncReset())))
-    val soc_clock = Option.when(!ClintAsyncFromSPMT)(IO(Input(Clock())))
-    val soc_reset = Option.when(!ClintAsyncFromSPMT)(IO(Input(AsyncReset())))
-    val i = Option.when(CHIAsyncFromSPMT)(IO(new Bundle {   //for spacemit
+    val soc_clock = Option.when(!ClintAsyncFromCJ)(IO(Input(Clock())))
+    val soc_reset = Option.when(!ClintAsyncFromCJ)(IO(Input(AsyncReset())))
+    val i = Option.when(CHIAsyncFromCJ)(IO(new Bundle {   //for customer J
       val dft = Input(new Bundle{
         val icg_scan_en = Bool()
         val scan_enable = Bool()
@@ -184,7 +184,7 @@ class XSNoCTop()(implicit p: Parameters) extends BaseXSSoc with HasSoCParameter
     }
 
     io.jtag.foreach(_ <> DontCare)
-    // TODO requirement from spacement: instanciated dtm to connected with debug,as other half module of debug module.
+    // TODO requirement from customer J: instanciated dtm to connected with debug,as other half module of debug module.
     //    def instantiateJtagDTM(sj: SystemJTAGIO): DebugTransportModuleJTAG = {
     val c = new JtagDTMKeyDefault
     val dtm = Option.when(UseDMInTop)(Module(new DebugTransportModuleJTAG(p(DebugModuleKey).get.nDMIAddrSize, c)))
@@ -227,7 +227,7 @@ class XSNoCTop()(implicit p: Parameters) extends BaseXSSoc with HasSoCParameter
     io.traceCoreInterface.toEncoder.iretire := VecInit(traceInterface.toEncoder.groups.map(_.bits.iretire)).asUInt
     io.traceCoreInterface.toEncoder.ilastsize := VecInit(traceInterface.toEncoder.groups.map(_.bits.ilastsize)).asUInt
 
-    (EnableClintAsyncBridge,ClintAsyncFromSPMT) match {
+    (EnableClintAsyncBridge,ClintAsyncFromCJ) match {
       case (Some(param), false) =>
             withClockAndReset(soc_clock.get, soc_reset_sync) {
               val source = Module(new AsyncQueueSource(UInt(64.W), param))
@@ -239,10 +239,10 @@ class XSNoCTop()(implicit p: Parameters) extends BaseXSSoc with HasSoCParameter
         core_with_l2.module.io.clintTime <> io.clintTime
     }
 
-    (EnableCHIAsyncBridge,CHIAsyncFromSPMT) match {
-      case (Some(param), true) => // chiasync bridge can be provided by spacemit co.
+    (EnableCHIAsyncBridge,CHIAsyncFromCJ) match {
+      case (Some(param), true) => // chiasync bridge can be provided by customer J co.
             withClockAndReset(noc_clock.get, noc_reset_sync.get) {
-              val sink = Module(new CHIAsyncICNSPMT())
+              val sink = Module(new CHIAsyncICNCJ())
               sink.i.dft.icg_scan_en := i.get.dft.icg_scan_en
               sink.i.dft.scan_enable := i.get.dft.scan_enable
               sink.io.cdb <> core_with_l2.module.io.chi
