@@ -19,10 +19,9 @@ class ClintAsyncCJ extends Module {
   io.o_time.valid := sync_inst.cpu_sys_cnt_updt_f
 }
 
-class xh_sys_cnt_sync extends BlackBox with HasBlackBoxResource {
+class xh_sys_cnt_sync extends BlackBox {
   val i_cpu_sys_cnt = IO(Input(UInt(64.W)))
   val i_cpu_sys_cnt_updt = IO(Input(Bool()))
   val cpu_sys_cnt = IO(Output(UInt(64.W)))
   val cpu_sys_cnt_updt_f = IO(Output(Bool()))
-  addResource("/aia/src/rtl/imsic/xh_sys_cnt_sync.v")
 }
