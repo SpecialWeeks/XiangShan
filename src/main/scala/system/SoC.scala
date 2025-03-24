@@ -104,7 +104,7 @@ case class SoCParameters
   UseDMInTop: Boolean = false,
   CHIAsyncFromCJ: Boolean = false, //CJ- customer ..
   ClintAsyncFromCJ: Boolean = false,
-  HasSECIMSIC:Boolean = false // 1:instance IMSIC twice,one is for tee, one is for ree
+  HasSECIMSIC:Boolean = false, // 1:instance IMSIC twice,one is for tee, one is for ree
   EnableDMAsyncBridge: Option[AsyncQueueParams] = Some(AsyncQueueParams(depth = 1, sync = 3, safe = false)),
   WFIClockGate: Boolean = false,
   EnablePowerDown: Boolean = false
