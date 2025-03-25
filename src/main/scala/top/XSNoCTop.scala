@@ -373,7 +373,7 @@ class XSNoCTop()(implicit p: Parameters) extends BaseXSSoc with HasSoCParameter
 
     // Seperate DebugModule TL Async Queue Sink
     if (SeperateDMBus && EnableDMAsync) {
-      dmAsyncSinkOpt.get.module.clock := soc_clock
+      dmAsyncSinkOpt.get.module.clock := soc_clock.get
       dmAsyncSinkOpt.get.module.reset := soc_reset_sync
     }
 
